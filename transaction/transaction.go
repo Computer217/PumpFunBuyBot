@@ -1,7 +1,6 @@
 package transaction
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,16 +11,15 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/Computer217/SolanaBotV2/data"
+	"github.com/Computer217/SolanaBotV2/generated/pump"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
 	"github.com/gagliardetto/solana-go/text"
-	"github.com/near/borsh-go"
 
 	associatedtokenaccount "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
@@ -34,6 +32,7 @@ const PumpFunCreateContract = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
 const PumpFun = "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"
 const Global = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"
 const BlockRouteContract = "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY"
+const EventAuthority = "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"
 
 // createComputeLimitInstruction creates an instruction that sets the compute unit limit.
 func createComputeLimitInstruction(computeLimit uint32) (*computebudget.Instruction, error) {
@@ -69,47 +68,24 @@ func createAssociateTokenAccountInstruction(Wallet solana.PublicKey, mint solana
 }
 
 // createPumpFunInstruction creates the instruction for buying tokens on pump.fun.
-func createPumpFunInstruction(wallet, mint, bondingCurve, associatedBondingCurve solana.PublicKey, maxLamportCost, tokenAmount uint64) (*solana.GenericInstruction, error) {
-	// Define the program ID for Pump.Fun
-	programID := solana.MustPublicKeyFromBase58(PumpFunBuyContract)
+func createPumpFunInstruction(wallet, mint, bondingCurve, associatedBondingCurve, associatedUser solana.PublicKey, maxLamportCost, tokenAmount uint64) (*pump.Instruction, error) {
+	pumpInstruction := pump.NewBuyInstruction(
+		tokenAmount,
+		maxLamportCost,
+		solana.MustPublicKeyFromBase58(Global),
+		solana.MustPublicKeyFromBase58(PumpFun),
+		mint,
+		bondingCurve,
+		associatedBondingCurve,
+		associatedUser,
+		wallet,
+		solana.SystemProgramID,
+		solana.TokenProgramID,
+		solana.SysVarRentPubkey,
+		solana.MustPublicKeyFromBase58(EventAuthority),
+		solana.MustPublicKeyFromBase58(PumpFunBuyContract))
 
-	// Get the associated token account for the receiver
-	associatedDestinationTokenAddr, _, err := solana.FindAssociatedTokenAddress(wallet, mint)
-	if err != nil {
-		return nil, err
-	}
-
-	// Define input accounts
-	accounts := []*solana.AccountMeta{
-		{PublicKey: solana.MustPublicKeyFromBase58(Global), IsSigner: false, IsWritable: false},                                 // Global.
-		{PublicKey: solana.MustPublicKeyFromBase58(PumpFun), IsSigner: false, IsWritable: true},                                 // Fee Recipient Pump.fun.
-		{PublicKey: solana.MustPublicKeyFromBase58(mint.String()), IsSigner: false, IsWritable: false},                          // Mint Address.
-		{PublicKey: solana.MustPublicKeyFromBase58(bondingCurve.String()), IsSigner: false, IsWritable: true},                   // Bonding Curve.
-		{PublicKey: solana.MustPublicKeyFromBase58(associatedBondingCurve.String()), IsSigner: false, IsWritable: true},         // Associated Bonding Curve.
-		{PublicKey: solana.MustPublicKeyFromBase58(associatedDestinationTokenAddr.String()), IsSigner: false, IsWritable: true}, // Associated User.
-		{PublicKey: solana.MustPublicKeyFromBase58(wallet.String()), IsSigner: true, IsWritable: true},                          // User.
-		{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},                                                 // System Program.
-		{PublicKey: solana.TokenProgramID, IsSigner: false, IsWritable: false},                                                  // Token Program.
-		{PublicKey: solana.SysVarRentPubkey, IsSigner: false, IsWritable: false},                                                // Rent Program.
-		// {PublicKey: solana.BPFLoaderUpgradeableProgramID, IsSigner: false, IsWritable: false},                                   // NEED TO FIGURE OUT.
-		// {PublicKey: solana.MustPublicKeyFromBase58(programID.String()), IsSigner: false, IsWritable: false},                     // NEED TO FIGURE OUT.
-	}
-
-	// serialize the instruction inputs.
-	data, err := borsh.Serialize(struct {
-		Cmd  uint8
-		Arg1 uint64
-		Arg2 uint64
-	}{
-		Cmd:  3, // The index of the function you want to call
-		Arg1: tokenAmount,
-		Arg2: maxLamportCost,
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Create the instruction.
-	return solana.NewInstruction(programID, accounts, data), nil
+	return pumpInstruction.ValidateAndBuild()
 }
 
 type BuyParams struct {
@@ -119,6 +95,7 @@ type BuyParams struct {
 	Mint                   solana.PublicKey
 	BondingCurve           solana.PublicKey
 	AssociatedBondingCurve solana.PublicKey
+	AssociatedUser         solana.PublicKey
 	TokenAmount            uint64
 	MaxLamportCost         uint64 // Price including slippage tolerance.
 }
@@ -156,6 +133,7 @@ func (b *BuyParams) BuildBuyTransaction() (*solana.Transaction, error) {
 		b.Mint,
 		b.BondingCurve,
 		b.AssociatedBondingCurve,
+		b.AssociatedUser,
 		b.MaxLamportCost,
 		b.TokenAmount)
 	if err != nil {
@@ -179,7 +157,7 @@ type TransactionHandler struct {
 	WsClient      *ws.Client
 	Wallet        *solana.Wallet
 	TokensHandled map[string]bool
-	SolToBuy      uint64
+	LampsToBuy    uint64
 }
 
 func NewTransactionHandler(urlEndpoint string, rpcClient *rpc.Client, wsClient *ws.Client, wallet *solana.Wallet) *TransactionHandler {
@@ -192,8 +170,9 @@ func NewTransactionHandler(urlEndpoint string, rpcClient *rpc.Client, wsClient *
 	}
 }
 
-func (t *TransactionHandler) SetSolPurchaseAmount(sol float64) {
-	t.SolToBuy = SolToLamp(sol)
+// amount purchasd needs to be in lamports.
+func (t *TransactionHandler) SetPurchaseAmount(sol float64) {
+	t.LampsToBuy = SolToLamp(sol)
 }
 
 func (t *TransactionHandler) SignAndSendTransaction(ctx context.Context, tx *solana.Transaction, wallet *solana.Wallet) error {
@@ -207,7 +186,7 @@ func (t *TransactionHandler) SignAndSendTransaction(ctx context.Context, tx *sol
 		},
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("tx.Sign failure: %v", err)
 	}
 	spew.Dump(tx)
 	tx.EncodeToTree(text.NewTreeEncoder(os.Stdout, "Buying from Pump.fun"))
@@ -220,17 +199,19 @@ func (t *TransactionHandler) SignAndSendTransaction(ctx context.Context, tx *sol
 		tx,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("SendAndConfirmTransaction failed: %v", err)
 	}
 	spew.Dump(sig)
 	return nil
 }
 
 func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data.MintData) {
-	// Calculate Slippage 10%
-	mintData.TokenAmount = uint64(math.Floor(float64(t.SolToBuy) / mintData.TokenPriceInSol))
-
-	slippage := float64(t.SolToBuy) + (float64(t.SolToBuy) * 0.1)
+	// Calculate the amount of tokens to buy.
+	mintData.TokenAmount = uint64(math.Floor(LampToSol(int64(t.LampsToBuy)) / mintData.TokenPriceInSol))
+	fmt.Printf("Purchase Amount: %v\n", t.LampsToBuy)
+	fmt.Printf("Token Price: %.12f\n", mintData.TokenPriceInSol)
+	fmt.Printf("Token Amount: %v\n", mintData.TokenAmount)
+	fmt.Printf("Token Info: %+v\n", mintData.Info)
 
 	tokenBuyParams := BuyParams{
 		TokenAmount:            mintData.TokenAmount,
@@ -240,8 +221,11 @@ func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data
 		Mint:                   solana.MustPublicKeyFromBase58(mintData.Info.Mint),
 		BondingCurve:           solana.MustPublicKeyFromBase58(mintData.Info.BondingCurve),
 		AssociatedBondingCurve: solana.MustPublicKeyFromBase58(mintData.Info.AssociateBondingCurve),
-		MaxLamportCost:         uint64(math.RoundToEven(slippage)),
+		AssociatedUser:         solana.MustPublicKeyFromBase58(mintData.Info.AssociatedUser),
+		MaxLamportCost:         maxLamportCost(t.LampsToBuy),
 	}
+
+	fmt.Printf("Buying %d tokens\n", tokenBuyParams.TokenAmount)
 
 	// Build transaction with instructions to buy tokens.
 	tx, err := tokenBuyParams.BuildBuyTransaction()
@@ -261,6 +245,14 @@ func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data
 	if err := t.SignAndSendTransaction(ctx, tx, t.Wallet); err != nil {
 		log.Fatalf("failed to sign and send transaction: %v", err)
 	}
+
+	log.Println("Listening for contract activity again...")
+}
+
+func maxLamportCost(LampsToBuy uint64) uint64 {
+	SolToBuy := LampToSol(int64(LampsToBuy))
+	// 10% slippage tolerance.
+	return SolToLamp(SolToBuy * 1.01)
 }
 
 func (t *TransactionHandler) handleTransaction(ctx context.Context, mintData *data.MintData) {
@@ -268,35 +260,19 @@ func (t *TransactionHandler) handleTransaction(ctx context.Context, mintData *da
 		return
 	} else {
 		t.TokensHandled[mintData.Info.Mint] = true
-
 	}
-
-	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("|============================|")
 	fmt.Println("|        Token Found         |")
 	fmt.Println("|============================|")
-	// fmt.Printf("Token Name: %v\n", l.TransactionLog) Print Symbol and Name     url := fmt.Sprintf("https://api.solanabeach.io/v1/token/%s", mintAddress)
+	fmt.Printf("Token Creation Hash: %v\n", mintData.CreationHash)
 	fmt.Printf("Mint Address: %v\n", mintData.Info.Mint)
 	fmt.Printf("Total Supply: %v\n", mintData.Info.TotalSupply)
 	fmt.Printf("Amount of Tokens Purchased by Dev %f\n", mintData.DevSupply)
 	fmt.Printf("Price of Token paid by dev in Sol: %.12f\n", mintData.TokenPriceInSol)
 	fmt.Printf("url: pump.fun/%v\n", mintData.Info.Mint)
-	// Print amount purchased by the dev
-	fmt.Printf("Purchase Parameters{\n    token_amount: %v\n    sol_amount: %v\n    token_info: %+v\n}\n", mintData.TokenAmount, mintData.SolAmount, mintData.Info)
-	fmt.Println()
-	fmt.Printf("Do you want to BUY this token? [y/n]: ")
-	input, _ := reader.ReadString('\n')
 
-	if strings.Contains(strings.ToLower(input), "y") {
-		go t.sendTransaction(ctx, mintData)
-	} else {
-		fmt.Println("|============================|")
-		fmt.Println("|Transaction skipped by user.|")
-		fmt.Println("|============================|")
-		fmt.Println()
-	}
-	log.Println("Listening for contract activity again...")
 	fmt.Println()
+	t.sendTransaction(ctx, mintData)
 }
 
 func (t *TransactionHandler) FilterTransactionForMintData(signature solana.Signature) (*data.MintData, error) {
@@ -460,7 +436,7 @@ func parseTransaction(d *data.GetParsedTransactionFromSignatureResponse) (*data.
 	if foundMint && calledPumpFun {
 		// fetch market cap.
 		fetchMarketCap(d, mintData)
-		fetchBondingCurve(d, mintData)
+		fetchBondingCurveAndAssociatedUser(d, mintData)
 		// fetch Bonding Curve
 		return mintData, nil
 	}
@@ -524,11 +500,12 @@ func fetchMarketCap(data *data.GetParsedTransactionFromSignatureResponse, mintDa
 	mintData.Info.MarketCapInSol = fmt.Sprintf("%f", priceInSol*remainingCirculatingSupply)
 }
 
-func fetchBondingCurve(d *data.GetParsedTransactionFromSignatureResponse, mintData *data.MintData) {
+func fetchBondingCurveAndAssociatedUser(d *data.GetParsedTransactionFromSignatureResponse, mintData *data.MintData) {
 	for _, innerInstruction := range d.Result.Meta.InnerInstructions {
 		for _, instruction := range innerInstruction.Instructions {
 			if instruction.Parsed.Type == "transfer" && instruction.ProgramID == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" && instruction.Program == "spl-token" {
-				mintData.Info.BondingCurve = instruction.Parsed.Info.Destination
+				mintData.Info.BondingCurve = instruction.Parsed.Info.Authority
+				mintData.Info.AssociatedUser = instruction.Parsed.Info.Destination
 			}
 		}
 	}
@@ -632,6 +609,7 @@ func SnipeTokens(ctx context.Context, mintChan chan *data.MintData, t *Transacti
 		case mintData := <-mintChan:
 			// Handle transaction.
 			t.handleTransaction(ctx, mintData)
+			os.Exit(1)
 		}
 	}
 }

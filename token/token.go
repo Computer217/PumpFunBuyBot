@@ -42,7 +42,7 @@ func FetchCreateTokens(ctx context.Context, wsSub *ws.LogSubscription, t *transa
 				retry.Delay(time.Second), // Set the delay between retries
 			)
 			if err != nil {
-				log.Printf("Retry budget Exhausted for fetching transaction details: %v\n", err)
+				log.Printf("Retry budget Exhausted for fetching transaction %v details: %v\n", msg.Value.Signature, err)
 				continue
 			}
 			if tx.Meta.Err != nil {
@@ -57,6 +57,7 @@ func FetchCreateTokens(ctx context.Context, wsSub *ws.LogSubscription, t *transa
 				return
 			}
 			if mintData != nil {
+				mintData.CreationHash = msg.Value.Signature.String()
 				mintChan <- mintData
 			}
 		}

@@ -119,9 +119,9 @@ type MintData struct {
 	Info            *MintInfo
 	Type            string
 	TokenAmount     uint64
-	SolAmount       uint64
 	DevSupply       float64
 	TokenPriceInSol float64
+	CreationHash    string
 }
 
 type MintInfo struct {
@@ -129,6 +129,7 @@ type MintInfo struct {
 	MintAuthority         string
 	BondingCurve          string
 	AssociateBondingCurve string // Associated Bonding Curve / Account.
+	AssociatedUser        string
 	TotalSupply           string
 	MarketCapInSol        string
 }

@@ -23,7 +23,7 @@ func main() {
 	var solanaAmount float64
 	flag.BoolVar(&runTest, "test", false, "run test")
 	flag.StringVar(&HeliusMainNet, "helius-api-key", "", "mainnet url")
-	flag.StringVar(&WebHook, "webhook", "", "mainnet url")
+	flag.StringVar(&WebHook, "websocket", "", "websocket url")
 	flag.StringVar(&walletPath, "wallet-path", "./wallet/botwallet.json", "wallet path")
 	flag.Float64Var(&solanaAmount, "solana-amount", 0, "solana amount")
 	flag.Parse()
@@ -67,7 +67,7 @@ func main() {
 
 	// Create transaction handler
 	h := transaction.NewTransactionHandler(HeliusMainNet, rpcClient, wsClient, &wallet)
-	h.SetSolPurchaseAmount(solanaAmount)
+	h.SetPurchaseAmount(solanaAmount)
 
 	// initialize channel for mint data.
 	mintChan := make(chan *data.MintData)
