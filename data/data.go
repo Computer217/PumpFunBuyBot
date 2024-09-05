@@ -1,5 +1,7 @@
 package data
 
+import "github.com/gagliardetto/solana-go"
+
 type Err struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -125,11 +127,8 @@ type MintData struct {
 }
 
 type MintInfo struct {
-	Mint                  string
-	MintAuthority         string
-	BondingCurve          string
-	AssociateBondingCurve string // Associated Bonding Curve / Account.
-	AssociatedUser        string
-	TotalSupply           string
-	MarketCapInSol        string
+	MintAddress    solana.PublicKey
+	MintAuthority  string
+	TotalSupply    string
+	MarketCapInSol string
 }

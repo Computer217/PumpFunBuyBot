@@ -156,22 +156,26 @@ type TransactionHandler struct {
 	RpcClient     *rpc.Client
 	WsClient      *ws.Client
 	Wallet        *solana.Wallet
-	TokensHandled map[string]bool
+	TokensHandled map[solana.PublicKey]bool
 	LampsToBuy    uint64
+	DryRun        bool
 }
 
-func NewTransactionHandler(urlEndpoint string, rpcClient *rpc.Client, wsClient *ws.Client, wallet *solana.Wallet) *TransactionHandler {
+// NewTransactionHandler creates a handler to send transactions to interact with pump.fun contract.
+func NewTransactionHandler(urlEndpoint string, rpcClient *rpc.Client, wsClient *ws.Client, wallet *solana.Wallet, dryRun bool) *TransactionHandler {
 	return &TransactionHandler{
 		UrlEndpoint:   urlEndpoint,
 		RpcClient:     rpcClient,
 		WsClient:      wsClient,
 		Wallet:        wallet,
-		TokensHandled: make(map[string]bool),
+		TokensHandled: make(map[solana.PublicKey]bool),
+		DryRun:        dryRun,
 	}
 }
 
-// amount purchasd needs to be in lamports.
+// set the amount of tokens to buy in sol.
 func (t *TransactionHandler) SetPurchaseAmount(sol float64) {
+	// instruction requires the amount of tokens to buy in lamports.
 	t.LampsToBuy = SolToLamp(sol)
 }
 
@@ -191,6 +195,17 @@ func (t *TransactionHandler) SignAndSendTransaction(ctx context.Context, tx *sol
 	spew.Dump(tx)
 	tx.EncodeToTree(text.NewTreeEncoder(os.Stdout, "Buying from Pump.fun"))
 
+	// If dry run is enabled, simulate the buy.
+	if t.DryRun {
+		log.Println("Simulating buy...")
+		resp, err := t.RpcClient.SimulateTransaction(ctx, tx)
+		if err != nil {
+			log.Fatal("Failed to simulate transaction:", err)
+		}
+		spew.Dump(resp)
+		return nil
+	}
+
 	// Send transaction, and wait for confirmation:
 	sig, err := confirm.SendAndConfirmTransaction(
 		ctx,
@@ -205,27 +220,58 @@ func (t *TransactionHandler) SignAndSendTransaction(ctx context.Context, tx *sol
 	return nil
 }
 
-func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data.MintData) {
+func (t *TransactionHandler) buyFromPumpfun(ctx context.Context, mintData *data.MintData) {
 	// Calculate the amount of tokens to buy.
 	mintData.TokenAmount = uint64(math.Floor(LampToSol(int64(t.LampsToBuy)) / mintData.TokenPriceInSol))
-	fmt.Printf("Purchase Amount: %v\n", t.LampsToBuy)
-	fmt.Printf("Token Price: %.12f\n", mintData.TokenPriceInSol)
-	fmt.Printf("Token Amount: %v\n", mintData.TokenAmount)
-	fmt.Printf("Token Info: %+v\n", mintData.Info)
+	fmt.Printf("\033[1;33mPurchase Amount (SOL):\033[0m \033[1;36m%.12f\033[0m\n", LampToSol(int64(t.LampsToBuy)))
+	fmt.Printf("\033[1;33mToken Price:\033[0m \033[1;36m%.12f\033[0m\n", mintData.TokenPriceInSol)
+	fmt.Printf("\033[1;33mToken Amount:\033[0m \033[1;36m%v\033[0m\n", mintData.TokenAmount)
+	fmt.Printf("\033[1;33mMarket Cap (SOL):\033[0m \033[1;36m%v\033[0m\n", mintData.Info.MarketCapInSol)
+	fmt.Printf("\033[1;33mMax Tx Cost (SOL):\033[0m \033[1;36m%.12f\033[0m\n", LampToSol(int64(maxLamportCost(t.LampsToBuy))))
 
+	// derive associated token account (ie. associateUser value from IDL).
+	ata, _, err := solana.FindAssociatedTokenAddress(
+		t.Wallet.PublicKey(),
+		mintData.Info.MintAddress,
+	)
+	if err != nil {
+		log.Fatalf("failed to derive associated token account: %v", err)
+	}
+
+	// Derive bonding curve address.
+	// define the seeds used to derive the PDA
+	// getProgramDerivedAddress equivalent.
+	seeds := [][]byte{
+		[]byte("bonding-curve"),
+		mintData.Info.MintAddress.Bytes(),
+	}
+
+	bondingCurve, _, err := solana.FindProgramAddress(seeds, solana.MustPublicKeyFromBase58(PumpFunBuyContract))
+	if err != nil {
+		log.Fatalf("failed to derive bonding curve address: %v", err)
+	}
+
+	// Derive associated bonding curve address.
+	associatedBondingCurve, _, err := solana.FindAssociatedTokenAddress(
+		bondingCurve,
+		mintData.Info.MintAddress,
+	)
+	if err != nil {
+		log.Fatalf("failed to derive associated bonding curve address: %v", err)
+	}
+
+	// set all parameters for buying tokens.
 	tokenBuyParams := BuyParams{
-		TokenAmount:            mintData.TokenAmount,
+		TokenAmount:            mintData.TokenAmount * 1000000, // shift by 6 since pumpfun specifies 6 decimal places.
 		ComputeLimit:           100000,
 		ComputeUnit:            100000,
 		Wallet:                 t.Wallet,
-		Mint:                   solana.MustPublicKeyFromBase58(mintData.Info.Mint),
-		BondingCurve:           solana.MustPublicKeyFromBase58(mintData.Info.BondingCurve),
-		AssociatedBondingCurve: solana.MustPublicKeyFromBase58(mintData.Info.AssociateBondingCurve),
-		AssociatedUser:         solana.MustPublicKeyFromBase58(mintData.Info.AssociatedUser),
+		Mint:                   mintData.Info.MintAddress,
+		BondingCurve:           bondingCurve,
+		AssociatedBondingCurve: associatedBondingCurve,
+		AssociatedUser:         ata,
 		MaxLamportCost:         maxLamportCost(t.LampsToBuy),
 	}
-
-	fmt.Printf("Buying %d tokens\n", tokenBuyParams.TokenAmount)
 
 	// Build transaction with instructions to buy tokens.
 	tx, err := tokenBuyParams.BuildBuyTransaction()
@@ -233,12 +279,11 @@ func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data
 		log.Fatalf("failed to build buy transaction: %v", err)
 	}
 
-	// Fetch recent blockhash
+	// Fetch recent blockhash and set in transaction.
 	recentBlockhash, err := t.RpcClient.GetRecentBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
 		log.Fatalf("Failed to fetch recent blockhash: %v", err)
 	}
-
 	tx.Message.RecentBlockhash = recentBlockhash.Value.Blockhash
 
 	// Sign and send the transaction.
@@ -249,30 +294,27 @@ func (t *TransactionHandler) sendTransaction(ctx context.Context, mintData *data
 	log.Println("Listening for contract activity again...")
 }
 
-func maxLamportCost(LampsToBuy uint64) uint64 {
-	SolToBuy := LampToSol(int64(LampsToBuy))
-	// 10% slippage tolerance.
-	return SolToLamp(SolToBuy * 1.01)
-}
-
 func (t *TransactionHandler) handleTransaction(ctx context.Context, mintData *data.MintData) {
-	if found := t.TokensHandled[mintData.Info.Mint]; found {
+	// handle duplicate token creation messages.
+	if found := t.TokensHandled[mintData.Info.MintAddress]; found {
 		return
 	} else {
-		t.TokensHandled[mintData.Info.Mint] = true
+		t.TokensHandled[mintData.Info.MintAddress] = true
 	}
-	fmt.Println("|============================|")
+
+	// Print to stdout when a avalid token is found.
+	fmt.Println("\033[1;32m|============================|")
 	fmt.Println("|        Token Found         |")
-	fmt.Println("|============================|")
-	fmt.Printf("Token Creation Hash: %v\n", mintData.CreationHash)
-	fmt.Printf("Mint Address: %v\n", mintData.Info.Mint)
-	fmt.Printf("Total Supply: %v\n", mintData.Info.TotalSupply)
-	fmt.Printf("Amount of Tokens Purchased by Dev %f\n", mintData.DevSupply)
-	fmt.Printf("Price of Token paid by dev in Sol: %.12f\n", mintData.TokenPriceInSol)
-	fmt.Printf("url: pump.fun/%v\n", mintData.Info.Mint)
+	fmt.Println("|============================|\033[0m")
+	fmt.Printf("\033[1;33mToken Creation Hash:\033[0m \033[1;32m%v\033[0m\n", mintData.CreationHash)
+	fmt.Printf("\033[1;33mMint Address:\033[0m \033[1;32m%v\033[0m\n", mintData.Info.MintAddress)
+	fmt.Printf("\033[1;33mTotal Supply:\033[0m \033[1;32m%v\033[0m\n", mintData.Info.TotalSupply)
+	fmt.Printf("\033[1;33mAmount of Tokens Purchased by Dev:\033[0m \033[1;32m%f\033[0m\n", mintData.DevSupply)
+	fmt.Printf("\033[1;33mPrice of Token paid by dev in Sol:\033[0m \033[1;32m%.12f\033[0m\n", mintData.TokenPriceInSol)
+	fmt.Printf("\033[1;33murl:\033[0m \033[1;32mpump.fun/%v\033[0m\n", mintData.Info.MintAddress)
 
 	fmt.Println()
-	t.sendTransaction(ctx, mintData)
+	t.buyFromPumpfun(ctx, mintData)
 }
 
 func (t *TransactionHandler) FilterTransactionForMintData(signature solana.Signature) (*data.MintData, error) {
@@ -352,6 +394,14 @@ func (t *TransactionHandler) getParsedTransactionFromSignature(hash string) (*da
 	return result, nil
 }
 
+// maxLamportCost calculates the maximum lamport cost for a given amount of tokens to buy including the slipage.
+// for no slippage, set the slippage tolerance to -1.
+func maxLamportCost(LampsToBuy uint64) uint64 {
+	solValue := LampToSol(int64(LampsToBuy))
+	totalAmountWithSlippage := solValue * 1.25 // %25 slippage tolerance.
+	return SolToLamp(totalAmountWithSlippage)
+}
+
 // skipNull skips null body responses when fetching for a transaction hash.
 func skipNull(bodyBytes []byte) (bool, error) {
 	var prettyJSON bytes.Buffer
@@ -427,17 +477,9 @@ func parseTransaction(d *data.GetParsedTransactionFromSignatureResponse) (*data.
 	// fetch mint data and check if it's a mint transaction.
 	mintData, foundMint := fetchMintInstruction(d)
 
-	// if calledPumpFun || foundMint {
-	// 	log.Println("Transaction signature: ", d.Result.Transaction.Signatures)
-	// 	log.Println("calledPumpFun: ", calledPumpFun)
-	// 	log.Println("foundMint: ", foundMint)
-	// }
-
 	if foundMint && calledPumpFun {
 		// fetch market cap.
 		fetchMarketCap(d, mintData)
-		fetchBondingCurveAndAssociatedUser(d, mintData)
-		// fetch Bonding Curve
 		return mintData, nil
 	}
 	return nil, nil
@@ -500,27 +542,15 @@ func fetchMarketCap(data *data.GetParsedTransactionFromSignatureResponse, mintDa
 	mintData.Info.MarketCapInSol = fmt.Sprintf("%f", priceInSol*remainingCirculatingSupply)
 }
 
-func fetchBondingCurveAndAssociatedUser(d *data.GetParsedTransactionFromSignatureResponse, mintData *data.MintData) {
-	for _, innerInstruction := range d.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.Parsed.Type == "transfer" && instruction.ProgramID == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" && instruction.Program == "spl-token" {
-				mintData.Info.BondingCurve = instruction.Parsed.Info.Authority
-				mintData.Info.AssociatedUser = instruction.Parsed.Info.Destination
-			}
-		}
-	}
-}
-
 func fetchMintInstruction(d *data.GetParsedTransactionFromSignatureResponse) (*data.MintData, bool) {
 	for _, innerInstruction := range d.Result.Meta.InnerInstructions {
 		for _, instruction := range innerInstruction.Instructions {
 			if instruction.Parsed.Type == "mintTo" && instruction.ProgramID == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
 				return &data.MintData{
 					Info: &data.MintInfo{
-						TotalSupply:           instruction.Parsed.Info.Amount,
-						Mint:                  instruction.Parsed.Info.Mint,
-						AssociateBondingCurve: instruction.Parsed.Info.Account,
-						MintAuthority:         instruction.Parsed.Info.MintAuthority,
+						TotalSupply:   instruction.Parsed.Info.Amount,
+						MintAddress:   solana.MustPublicKeyFromBase58(instruction.Parsed.Info.Mint),
+						MintAuthority: instruction.Parsed.Info.MintAuthority,
 					},
 					Type: instruction.Parsed.Type,
 				}, true
@@ -609,7 +639,7 @@ func SnipeTokens(ctx context.Context, mintChan chan *data.MintData, t *Transacti
 		case mintData := <-mintChan:
 			// Handle transaction.
 			t.handleTransaction(ctx, mintData)
-			os.Exit(1)
+			os.Exit(1) // remove after testing is done.
 		}
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"os/signal"
 
 	"github.com/Computer217/SolanaBotV2/data"
-	"github.com/Computer217/SolanaBotV2/test"
 	"github.com/Computer217/SolanaBotV2/token"
 	"github.com/Computer217/SolanaBotV2/transaction"
 	"github.com/gagliardetto/solana-go"
@@ -18,24 +17,16 @@ import (
 
 func main() {
 	// Parse command line arguments.
-	var runTest bool
-	var HeliusMainNet, WebHook, walletPath string
-	var solanaAmount float64
-	flag.BoolVar(&runTest, "test", false, "run test")
-	flag.StringVar(&HeliusMainNet, "helius-api-key", "", "mainnet url")
-	flag.StringVar(&WebHook, "websocket", "", "websocket url")
-	flag.StringVar(&walletPath, "wallet-path", "./wallet/botwallet.json", "wallet path")
-	flag.Float64Var(&solanaAmount, "solana-amount", 0, "solana amount")
+	dryRun := flag.Bool("test", false, "run test")
+	HeliusMainNet := flag.String("helius-api-key", "", "mainnet url api key")
+	WebHook := flag.String("websocket", "", "websocket url")
+	walletPath := flag.String("wallet-path", "./wallet/botwallet.json", "wallet path")
+	defaultSolanaAmount := flag.Float64("solana-amount", 0, "solana amount to purchase")
 	flag.Parse()
 
-	// If test flag is set, run test.
-	if runTest {
-		test.TestBuyOnDevNet(walletPath)
-	}
-
-	// wallet to perform transactions.
+	// extract wallet to perform transactions.
 	var wallet solana.Wallet
-	pk, err := solana.PrivateKeyFromSolanaKeygenFile(walletPath)
+	pk, err := solana.PrivateKeyFromSolanaKeygenFile(*walletPath)
 	if err != nil {
 		log.Fatal("Failed to read wallet file:", err)
 	}
@@ -45,7 +36,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Connect to the WebSocket server
-	wsClient, err := ws.Connect(ctx, WebHook)
+	wsClient, err := ws.Connect(ctx, *WebHook)
 	if err != nil {
 		log.Fatal("Failed to connect to WebSocket server:", err)
 	}
@@ -62,12 +53,14 @@ func main() {
 	}
 
 	// Create a new RPC client
-	rpcClient := rpc.New(HeliusMainNet)
+	rpcClient := rpc.New(*HeliusMainNet)
 	defer rpcClient.Close()
 
 	// Create transaction handler
-	h := transaction.NewTransactionHandler(HeliusMainNet, rpcClient, wsClient, &wallet)
-	h.SetPurchaseAmount(solanaAmount)
+	h := transaction.NewTransactionHandler(*HeliusMainNet, rpcClient, wsClient, &wallet, *dryRun)
+
+	// Set the amount of sol used to purchase tokens.
+	h.SetPurchaseAmount(*defaultSolanaAmount)
 
 	// initialize channel for mint data.
 	mintChan := make(chan *data.MintData)
