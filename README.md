@@ -19,4 +19,6 @@ General Logic:
 4. Build pump.fun buy transaction
 5. Send pump.fun buy transaction
 
+> NOTE: This bot continously buys the amount speciffied in the flag --solana-amount for each mint created in pump.fun. To stop buying, you must kill the program. 
+
  
