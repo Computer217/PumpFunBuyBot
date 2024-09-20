@@ -18,8 +18,8 @@ import (
 func main() {
 	// Parse command line arguments.
 	dryRun := flag.Bool("test", false, "run test")
-	HeliusMainNet := flag.String("helius-api-key", "", "mainnet url api key")
-	WebHook := flag.String("websocket", "", "websocket url")
+	HeliusMainNet := flag.String("helius-rpc-api-key", "", "mainnet url api key")
+	WebHook := flag.String("helius-websocket-api-key", "", "websocket url api key")
 	walletPath := flag.String("wallet-path", "./wallet/botwallet.json", "wallet path")
 	defaultSolanaAmount := flag.Float64("solana-amount", 0, "solana amount to purchase")
 	flag.Parse()
@@ -47,7 +47,7 @@ func main() {
 	signal.Notify(interrupt, os.Interrupt)
 
 	// Subscribe to account changes
-	wsSub, err := wsClient.LogsSubscribeMentions(solana.MustPublicKeyFromBase58(transaction.PumpFunCreateContract), rpc.CommitmentFinalized)
+	wsSub, err := wsClient.LogsSubscribeMentions(solana.MustPublicKeyFromBase58(transaction.PumpFunCreateTokenContract), rpc.CommitmentFinalized)
 	if err != nil {
 		log.Fatal("Failed to subscribe to account changes:", err)
 	}
@@ -64,7 +64,10 @@ func main() {
 
 	// initialize channel for mint data.
 	mintChan := make(chan *data.MintData)
-	go token.FetchCreateTokens(ctx, wsSub, h, mintChan)
+
+	// listen for pump fun contract mint activity.
+	// for each mint, fetch the mint data and pass to the channel.
+	go token.FetchCreatedTokenMintData(ctx, wsSub, h, mintChan)
 
 	// Go routine for sniping tokens.
 	go transaction.SnipeTokens(ctx, mintChan, h)

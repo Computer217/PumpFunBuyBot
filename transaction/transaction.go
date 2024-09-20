@@ -10,7 +10,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"strconv"
 
 	"github.com/Computer217/SolanaBotV2/data"
 	"github.com/Computer217/SolanaBotV2/generated/pump"
@@ -28,7 +27,7 @@ import (
 
 const JitoTip5 = "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh"
 const PumpFunBuyContract = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-const PumpFunCreateContract = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+const PumpFunCreateTokenContract = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
 const PumpFun = "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"
 const Global = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"
 const BlockRouteContract = "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY"
@@ -317,25 +316,7 @@ func (t *TransactionHandler) handleTransaction(ctx context.Context, mintData *da
 	t.buyFromPumpfun(ctx, mintData)
 }
 
-func (t *TransactionHandler) FilterTransactionForMintData(signature solana.Signature) (*data.MintData, error) {
-	// fetch granular tx data.
-	data, err := t.getParsedTransactionFromSignature(signature.String())
-	if err != nil {
-		return nil, err
-	}
-	if data != nil {
-		// Parse the transaction for mint data.
-		mint, err := parseTransaction(data)
-		if err != nil {
-			log.Println("Error parsing transaction:", err)
-			return nil, err
-		}
-		return mint, nil
-	}
-	return nil, nil
-}
-
-func (t *TransactionHandler) getParsedTransactionFromSignature(hash string) (*data.GetParsedTransactionFromSignatureResponse, error) {
+func (t *TransactionHandler) GetParsedTransactionFromSignature(hash string) (*data.GetParsedTransactionFromSignatureResponse, error) {
 	// JSON-RPC request body
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -465,163 +446,6 @@ func skipLegacy(bodyBytes []byte) (bool, error) {
 	return false, nil
 }
 
-func parseTransaction(d *data.GetParsedTransactionFromSignatureResponse) (*data.MintData, error) {
-	// if transaction results in error skip.
-	if d.Result.Meta.Err != (data.Err{}) {
-		return nil, nil
-	}
-
-	// Check if the transaction has as a destination the pump.fun contract.
-	calledPumpFun := calledPumpfunContract(d)
-
-	// fetch mint data and check if it's a mint transaction.
-	mintData, foundMint := fetchMintInstruction(d)
-
-	if foundMint && calledPumpFun {
-		// fetch market cap.
-		fetchMarketCap(d, mintData)
-		return mintData, nil
-	}
-	return nil, nil
-}
-
-func fetchMarketCap(data *data.GetParsedTransactionFromSignatureResponse, mintData *data.MintData) {
-	var splTokenTransfer, solanaTokenTransfer struct {
-		Accounts    []string "json:\"accounts,omitempty\""
-		Data        string   "json:\"data,omitempty\""
-		ProgramID   string   "json:\"programId\""
-		StackHeight int      "json:\"stackHeight\""
-		Parsed      struct {
-			Info struct {
-				Amount        string "json:\"amount\""
-				Authority     string "json:\"authority\""
-				Destination   string "json:\"destination\""
-				Source        string "json:\"source\""
-				Lamports      int64  "json:\"lamports,omitempty\""
-				Mint          string "json:\"mint,omitempty\""
-				MintAuthority string "json:\"mintAuthority,omitempty\""
-				Account       string "json:\"account,omitempty\""
-			} "json:\"info\""
-			Type string "json:\"type\""
-		} "json:\"parsed,omitempty\""
-		Program string "json:\"program,omitempty\""
-	}
-
-	for _, innerInstruction := range data.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.Parsed.Type == "transfer" {
-				i, _ := strconv.Atoi(instruction.Parsed.Info.Amount)
-				if instruction.Program == "spl-token" && i > 0 {
-					splTokenTransfer = instruction
-				}
-				if instruction.Program == "system" && instruction.ProgramID == "11111111111111111111111111111111" && instruction.Parsed.Info.Destination != PumpFun && instruction.Parsed.Info.Destination != BlockRouteContract && instruction.Parsed.Info.Lamports != 0 {
-					solanaTokenTransfer = instruction
-				}
-			}
-		}
-	}
-
-	// calculate market cap.
-	// Fetch the dev amount and the remaining circulating supply.
-	var remainingCirculatingSupply, devSupply float64
-	if splTokenTransfer.Parsed.Info.Amount == data.Result.Meta.PostTokenBalances[1].UITokenAmount.Amount {
-		devSupply = data.Result.Meta.PostTokenBalances[1].UITokenAmount.UIAmount
-		remainingCirculatingSupply = data.Result.Meta.PostTokenBalances[0].UITokenAmount.UIAmount
-	} else {
-		devSupply = data.Result.Meta.PostTokenBalances[0].UITokenAmount.UIAmount
-		remainingCirculatingSupply = data.Result.Meta.PostTokenBalances[1].UITokenAmount.UIAmount
-	}
-	mintData.DevSupply = devSupply
-
-	// calculate how much dev paid per token.
-	amountPaidForToken := float64(LampToSol(solanaTokenTransfer.Parsed.Info.Lamports))
-	priceInSol := amountPaidForToken / devSupply
-	mintData.TokenPriceInSol = priceInSol
-
-	// Calculate market cap.
-	mintData.Info.MarketCapInSol = fmt.Sprintf("%f", priceInSol*remainingCirculatingSupply)
-}
-
-func fetchMintInstruction(d *data.GetParsedTransactionFromSignatureResponse) (*data.MintData, bool) {
-	for _, innerInstruction := range d.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.Parsed.Type == "mintTo" && instruction.ProgramID == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
-				return &data.MintData{
-					Info: &data.MintInfo{
-						TotalSupply:   instruction.Parsed.Info.Amount,
-						MintAddress:   solana.MustPublicKeyFromBase58(instruction.Parsed.Info.Mint),
-						MintAuthority: instruction.Parsed.Info.MintAuthority,
-					},
-					Type: instruction.Parsed.Type,
-				}, true
-			}
-		}
-	}
-	return nil, false
-}
-
-func calledPumpfunContract(data *data.GetParsedTransactionFromSignatureResponse) bool {
-	// underTwoSolPurchased denotes whether the dev bought less than 2 sol at the time of token creation.
-	// pumpFunCalled denotes whether the dev interacted with the pump.fun contract at the time of token creation.
-	var overOneSolPurchased, pumpFunCalled bool
-
-	// if there is a preTokenBalance then it is not a mintTransaction.
-	if len(data.Result.Meta.PreTokenBalances) > 0 {
-		return false
-	}
-
-	// fetch the dev address. This is the source address for the transaction interacting with the pumpFun contract address.
-	var devAddress string
-	for _, innerInstruction := range data.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.Parsed.Type == "transfer" {
-				if instruction.Parsed.Info.Destination == PumpFun {
-					devAddress = instruction.Parsed.Info.Source
-				}
-			}
-		}
-	}
-
-	// theAccountOwnerOfNewTokenOne and accountOwnerOfNewTokenTwo are either:
-	// 1. The address for the dev token account.
-	// 2. The address for the account associated with the mint of the new token.
-
-	if len(data.Result.Meta.PostTokenBalances) < 2 {
-		log.Println("PostTokenBalances is less than 2")
-		log.Println(data.Result.Transaction.Signatures)
-	}
-
-	accountOwnerOfNewTokenOne := data.Result.Meta.PostTokenBalances[0].Owner
-	accountOwnerOfNewTokenTwo := data.Result.Meta.PostTokenBalances[1].Owner
-
-	// check if the dev purchased less than 2 sol.
-	for _, innerInstruction := range data.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.Parsed.Type == "transfer" {
-				// check the following 3 conditions:
-				// 1. The source/sender address is the dev address.
-				// 2. The destination address is either the dev token account or the contract holding account associated with the mint of the new token.
-				// 3. The amount of lamports transferred is less than 2 sol.
-				if instruction.Parsed.Info.Source == devAddress &&
-					(instruction.Parsed.Info.Destination == accountOwnerOfNewTokenOne || instruction.Parsed.Info.Destination == accountOwnerOfNewTokenTwo) &&
-					LampToSol(instruction.Parsed.Info.Lamports) <= 2.0 {
-					overOneSolPurchased = true
-				}
-			}
-		}
-	}
-
-	// check if we interacted with the pump.fun contract.
-	for _, innerInstruction := range data.Result.Meta.InnerInstructions {
-		for _, instruction := range innerInstruction.Instructions {
-			if instruction.ProgramID == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" {
-				pumpFunCalled = true
-			}
-		}
-	}
-	return overOneSolPurchased && pumpFunCalled
-}
-
 func LampToSol(lamports int64) float64 {
 	return float64(lamports) / 1000000000.0
 }
@@ -639,7 +463,6 @@ func SnipeTokens(ctx context.Context, mintChan chan *data.MintData, t *Transacti
 		case mintData := <-mintChan:
 			// Handle transaction.
 			t.handleTransaction(ctx, mintData)
-			os.Exit(1) // remove after testing is done.
 		}
 	}
 }
