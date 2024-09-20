@@ -35,7 +35,7 @@ func main() {
 	// init context.
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Connect to the WebSocket server
+	// Connect to the WebSocket server.
 	wsClient, err := ws.Connect(ctx, *WebHook)
 	if err != nil {
 		log.Fatal("Failed to connect to WebSocket server:", err)
@@ -46,17 +46,17 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	// Subscribe to account changes
+	// Subscribe to account changes.
 	wsSub, err := wsClient.LogsSubscribeMentions(solana.MustPublicKeyFromBase58(transaction.PumpFunCreateTokenContract), rpc.CommitmentFinalized)
 	if err != nil {
 		log.Fatal("Failed to subscribe to account changes:", err)
 	}
 
-	// Create a new RPC client
+	// Create a new RPC client.
 	rpcClient := rpc.New(*HeliusMainNet)
 	defer rpcClient.Close()
 
-	// Create transaction handler
+	// Create transaction handler.
 	h := transaction.NewTransactionHandler(*HeliusMainNet, rpcClient, wsClient, &wallet, *dryRun)
 
 	// Set the amount of sol used to purchase tokens.
