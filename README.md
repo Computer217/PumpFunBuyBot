@@ -21,4 +21,9 @@ General Logic:
 
 > NOTE: This bot continously buys the amount speciffied in the flag --solana-amount for each mint created in pump.fun. To stop buying, you must kill the program. 
 
+Please file bugs for any desired added features!
+
+To support my dev work: 
+
+- Sol Addr: 9hTDxXAsHsJtVfhZJsfzprv74VPYpVxxRmvV1jUgToEp
  
